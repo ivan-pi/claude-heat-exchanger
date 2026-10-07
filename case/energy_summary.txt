@@ -1,0 +1,16 @@
+Energy budget at t = 20.000 s  (W per m depth)
+  hot stream loss      H_in - H_out        91.89331
+  hot fluid -> wall    (Fluid mesh)        91.89331
+  hot fluid -> wall    (Solid mesh)        91.89331
+  wall -> cold fluid   (Solid mesh)        91.89331
+  wall -> cold fluid   (Fluid mesh)        91.89331
+  cold stream gain     H_out - H_in        91.89331
+  solid storage        dE_s/dt              0.00000
+  hot channel storage  dE_h/dt              0.00000
+  cold channel storage dE_c/dt              0.00000
+  hot loss - cold gain (steady-state check) / Q     = +1.119e-08
+  max |global residual| over the run / Q            = 3.371e-06
+  max |hot, cold, solid residual| over the run / Q  = 7.726e-12, 7.618e-12, 7.807e-09
+  interface mismatch hot  (Fluid - Solid) / Q       = +3.678e-11
+  interface mismatch cold (Fluid - Solid) / Q       = -2.764e-11
+  bulk outlet temperatures: hot 341.326 K, cold 302.189 K

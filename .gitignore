@@ -1,0 +1,7 @@
+build/
+solvers/*/build/
+case/precice-run/
+case/*/output/
+case/*/*.log
+case/*/precice-*
+case/run.log

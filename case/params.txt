@@ -1,0 +1,49 @@
+# Shared case parameters, read by both participants (SI units).
+# Counterflow parallel-plate micro heat exchanger: two water channels separated by an
+# insulating polymer wall. Time-window size and end time live in precice-config.xml.
+
+# --- geometry ------------------------------------------------------------------------
+channel_length       6.0e-3    # L  [m]
+channel_height       1.0e-3    # H  [m]  (each channel)
+wall_thickness       0.5e-3    # d  [m]
+
+# --- fluid: water at ~30 C ---------------------------------------------------------------
+fluid_density        996.0     # [kg/m^3]
+fluid_cp             4180.0    # [J/(kg K)]
+fluid_conductivity   0.615     # [W/(m K)]
+fluid_viscosity      0.80e-6   # kinematic [m^2/s]
+
+# --- operating point -------------------------------------------------------------------
+u_mean_hot           2.5e-3    # [m/s], hot stream flows in +x
+u_mean_cold          1.75e-3   # [m/s], cold stream flows in -x (unequal capacity rates)
+T_in_hot             350.0     # [K]
+T_in_cold            290.0     # [K]
+
+# --- baffles (masked LBM solid nodes, adiabatic) -------------------------------------
+# Thin plates alternating between the outer and the coupled wall -> serpentine flow with
+# inverted-U loops over the plates standing on the lower wall (baffle_alternating 0: all
+# plates on the outer wall). Channels staggered by half a pitch. baffle_count 0 -> straight.
+# Keep the solid fraction < 10 % and the gap velocity at lattice Mach < ~0.1.
+baffle_count         8
+baffle_alternating   1
+baffle_height        0.65      # fraction of the channel height
+baffle_thickness     6.25e-5   # [m] (rounded to lattice cells)
+
+# --- solid: polymer insulating layer (e.g. polypropylene) ----------------------------------
+solid_density        900.0     # [kg/m^3]
+solid_cp             1900.0    # [J/(kg K)]
+solid_conductivity   0.2       # [W/(m K)]
+solid_T_init         320.0     # [K]
+
+# --- discretisation ----------------------------------------------------------------------
+lbm_ny               32        # lattice cells across one channel (dx = H/lbm_ny)
+lbm_dt               2.5e-4    # lattice time step [s]; the window size must be a multiple
+lbm_flow_init_time   2.0       # [s] flow-only start-up before coupling (thermal field reset)
+solid_nx             96        # FD intervals along x
+solid_ny             16        # FD intervals across the wall
+solid_dt             0.05      # max. implicit time step [s] (one step per window if >= window)
+cg_tol               1.0e-8    # PCG: residual reduction relative to the initial residual
+cg_maxit             2000
+
+# --- output ------------------------------------------------------------------------------
+output_interval      1.0       # [s] VTK output + diagnostics

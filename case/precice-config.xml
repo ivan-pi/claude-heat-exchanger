@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  Conjugate heat transfer in a 2-D counterflow heat exchanger.
+
+    Fluid (Code A, LBM D2Q9 + D2Q5, C++)  <->  Solid (Code B, implicit FD, Fortran)
+
+  Two interfaces (hot side / cold side of the wall), each with a Fluid and a Solid mesh.
+  Dirichlet-Neumann partitioning chosen for the INSULATING wall:
+    Fluid writes Temperature, reads Heat-Flux   (Neumann side: the better-conducting fluid)
+    Solid writes Heat-Flux,   reads Temperature (Dirichlet side: the low-conductance wall)
+  Heat-Flux is the normal flux from the wall into the fluid [W/m^2].
+-->
+<precice-configuration>
+  <log>
+    <sink filter="%Severity% > debug and %Rank% = 0" format="---[precice] %ColorizedSeverity% %Message%" enabled="true" />
+  </log>
+
+  <data:scalar name="Temperature" />
+  <data:scalar name="Heat-Flux" />
+
+  <mesh name="Fluid-Hot-Mesh" dimensions="2">
+    <use-data name="Temperature" />
+    <use-data name="Heat-Flux" />
+  </mesh>
+  <mesh name="Fluid-Cold-Mesh" dimensions="2">
+    <use-data name="Temperature" />
+    <use-data name="Heat-Flux" />
+  </mesh>
+  <mesh name="Solid-Hot-Mesh" dimensions="2">
+    <use-data name="Temperature" />
+    <use-data name="Heat-Flux" />
+  </mesh>
+  <mesh name="Solid-Cold-Mesh" dimensions="2">
+    <use-data name="Temperature" />
+    <use-data name="Heat-Flux" />
+  </mesh>
+
+  <participant name="Fluid">
+    <provide-mesh name="Fluid-Hot-Mesh" />
+    <provide-mesh name="Fluid-Cold-Mesh" />
+    <write-data name="Temperature" mesh="Fluid-Hot-Mesh" />
+    <write-data name="Temperature" mesh="Fluid-Cold-Mesh" />
+    <read-data name="Heat-Flux" mesh="Fluid-Hot-Mesh" />
+    <read-data name="Heat-Flux" mesh="Fluid-Cold-Mesh" />
+  </participant>
+
+  <participant name="Solid">
+    <provide-mesh name="Solid-Hot-Mesh" />
+    <provide-mesh name="Solid-Cold-Mesh" />
+    <receive-mesh name="Fluid-Hot-Mesh" from="Fluid" />
+    <receive-mesh name="Fluid-Cold-Mesh" from="Fluid" />
+    <read-data name="Temperature" mesh="Solid-Hot-Mesh" />
+    <read-data name="Temperature" mesh="Solid-Cold-Mesh" />
+    <write-data name="Heat-Flux" mesh="Solid-Hot-Mesh" />
+    <write-data name="Heat-Flux" mesh="Solid-Cold-Mesh" />
+    <!-- 1-D linear interpolation along the interface (both meshes define edges) -->
+    <mapping:nearest-projection direction="read" from="Fluid-Hot-Mesh" to="Solid-Hot-Mesh" constraint="consistent" />
+    <mapping:nearest-projection direction="read" from="Fluid-Cold-Mesh" to="Solid-Cold-Mesh" constraint="consistent" />
+    <mapping:nearest-projection direction="write" from="Solid-Hot-Mesh" to="Fluid-Hot-Mesh" constraint="consistent" />
+    <mapping:nearest-projection direction="write" from="Solid-Cold-Mesh" to="Fluid-Cold-Mesh" constraint="consistent" />
+  </participant>
+
+  <!-- TCP/IP sockets on the loopback interface. On a cluster: network="ib0" (or similar)
+       and a shared exchange-directory visible to both participants. -->
+  <m2n:sockets acceptor="Fluid" connector="Solid" exchange-directory=".." network="lo" />
+
+  <coupling-scheme:serial-implicit>
+    <participants first="Fluid" second="Solid" />
+    <max-time value="20.0" />
+    <!-- must be an integer multiple of lbm_dt in params.txt -->
+    <time-window-size value="0.05" />
+    <max-iterations value="30" />
+    <exchange data="Temperature" mesh="Fluid-Hot-Mesh" from="Fluid" to="Solid" />
+    <exchange data="Temperature" mesh="Fluid-Cold-Mesh" from="Fluid" to="Solid" />
+    <exchange data="Heat-Flux" mesh="Fluid-Hot-Mesh" from="Solid" to="Fluid" />
+    <exchange data="Heat-Flux" mesh="Fluid-Cold-Mesh" from="Solid" to="Fluid" />
+    <relative-convergence-measure limit="1e-6" data="Temperature" mesh="Fluid-Hot-Mesh" />
+    <relative-convergence-measure limit="1e-6" data="Temperature" mesh="Fluid-Cold-Mesh" />
+    <relative-convergence-measure limit="1e-4" data="Heat-Flux" mesh="Fluid-Hot-Mesh" />
+    <relative-convergence-measure limit="1e-4" data="Heat-Flux" mesh="Fluid-Cold-Mesh" />
+    <acceleration:IQN-ILS>
+      <data name="Heat-Flux" mesh="Fluid-Hot-Mesh" />
+      <data name="Heat-Flux" mesh="Fluid-Cold-Mesh" />
+      <preconditioner type="residual-sum" />
+      <filter type="QR2" limit="1e-2" />
+      <initial-relaxation value="0.5" />
+      <max-used-iterations value="30" />
+      <time-windows-reused value="5" />
+    </acceleration:IQN-ILS>
+  </coupling-scheme:serial-implicit>
+</precice-configuration>
