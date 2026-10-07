@@ -33,22 +33,24 @@ namespace lbm {
 
 // ---------------------------------------------------------------------------------------
 // D2Q9 velocity set; directions 0..4 are the D2Q5 set of the thermal lattice.
+// The tables are function-local constexpr arrays rather than namespace-scope ones: nvcc
+// does not allow run-time indexing of a namespace-scope constexpr array from device code.
 // ---------------------------------------------------------------------------------------
 namespace d2q9 {
 
-LBM_HD inline int cx(int k)
+LBM_HD constexpr int cx(int k)
 {
-  const int t[9] = {0, 1, 0, -1, 0, 1, -1, -1, 1};
+  constexpr int t[9] = {0, 1, 0, -1, 0, 1, -1, -1, 1};
   return t[k];
 }
-LBM_HD inline int cy(int k)
+LBM_HD constexpr int cy(int k)
 {
-  const int t[9] = {0, 0, 1, 0, -1, 1, 1, -1, -1};
+  constexpr int t[9] = {0, 0, 1, 0, -1, 1, 1, -1, -1};
   return t[k];
 }
-LBM_HD inline int opp(int k)
+LBM_HD constexpr int opp(int k)
 {
-  const int t[9] = {0, 3, 4, 1, 2, 7, 8, 5, 6};
+  constexpr int t[9] = {0, 3, 4, 1, 2, 7, 8, 5, 6};
   return t[k];
 }
 
