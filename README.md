@@ -195,6 +195,8 @@ managed buffer whose pointer goes to preCICE after `device_sync()`, and reads th
 a second one that the next kernel picks up; only those pages migrate, not the lattice. Code
 B does `!$omp target update from(q)` / `to(Tb)` on the 1-D buffers; with `-gpu=mem:unified`
 on Grace Hopper these are practically free, and the same code works on discrete GPUs.
+What a device-direct exchange would require is discussed in
+`docs/device-direct-coupling.md`.
 
 ## Limitations / next steps
 
