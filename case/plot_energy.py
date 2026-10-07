@@ -15,69 +15,21 @@ Energy budget (per unit depth, W/m), with H = enthalpy flow relative to T_ref:
 
 Usage: python3 plot_energy.py [case-dir]
 """
-import glob
 import os
 import sys
 
 import numpy as np
-import matplotlib
 
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
+from hx_post import (AQUA, BLUE, INK, INK2, MAGENTA, MM, ORANGE, SURF, VIOLET, YELLOW, Field,
+                     apply_style, case_dirs, draw_fields, load_energy_logs, plt, read_csv,
+                     sorted_files, temperature_cmap)
 
-CASE = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
-FL = os.path.join(CASE, "fluid", "output")
-SO = os.path.join(CASE, "solid", "output")
+CASE, FL, SO = case_dirs(sys.argv)
+apply_style()
 
-# palette (validated categorical order) and text inks
-BLUE, ORANGE, AQUA, YELLOW, MAGENTA = "#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"
-VIOLET = "#4a3aa7"
-INK, INK2, GRID, SURF = "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
-plt.rcParams.update({
-    "figure.facecolor": SURF, "axes.facecolor": SURF, "savefig.facecolor": SURF,
-    "axes.edgecolor": INK2, "axes.labelcolor": INK, "xtick.color": INK2, "ytick.color": INK2,
-    "axes.grid": True, "grid.color": GRID, "grid.linewidth": 0.8,
-    "axes.spines.top": False, "axes.spines.right": False,
-    "lines.linewidth": 2.0, "font.size": 10, "legend.frameon": False,
-})
-
-
-def read_csv(path):
-    return np.genfromtxt(path, delimiter=",", names=True)
-
-
-def read_vtk(path):
-    """Legacy STRUCTURED_POINTS reader: returns T (NaN on solid nodes), velocity (or
-    None), extent of the node centres, dx, dy."""
-    with open(path) as f:
-        lines = f.read().split("\n")
-    nx, ny = (int(v) for v in lines[4].split()[1:3])
-    ox, oy = (float(v) for v in lines[5].split()[1:3])
-    dx, dy = (float(v) for v in lines[6].split()[1:3])
-    n = nx * ny
-    T, vel = None, None
-    for k, line in enumerate(lines):
-        if line.startswith("SCALARS T "):
-            T = np.array(lines[k + 2:k + 2 + n], dtype=float).reshape(ny, nx)
-        elif line.startswith("VECTORS velocity"):
-            vel = np.array([v.split()[:2] for v in lines[k + 1:k + 1 + n]], dtype=float).reshape(ny, nx, 2)
-    return T, vel, (ox, ox + (nx - 1) * dx, oy, oy + (ny - 1) * dy), dx, dy
-
-
-def last(pattern):
-    files = sorted(glob.glob(pattern))
-    if not files:
-        sys.exit(f"no files matching {pattern}")
-    return files[-1]
-
-
-fe = read_csv(os.path.join(FL, "fluid_energy.csv"))
-se = read_csv(os.path.join(SO, "solid_energy.csv"))
+fe, se = load_energy_logs(FL, SO)
 fi = read_csv(os.path.join(FL, "fluid_interface.csv"))
 si = read_csv(os.path.join(SO, "solid_interface.csv"))
-n = min(len(fe), len(se))
-fe, se = fe[:n], se[:n]
 t = fe["time"]
 
 # --- budgets --------------------------------------------------------------------------
@@ -104,37 +56,16 @@ gs = fig.add_gridspec(3, 2, height_ratios=[1.15, 1.0, 1.0])
 
 # (a) temperature field: diverging around the mean inlet temperature
 ax = fig.add_subplot(gs[0, :])
-Th, Vh, eh, dxh, _ = read_vtk(last(os.path.join(FL, "fluid_hot_*.vtk")))
-Tc, Vc, ec, dxc, _ = read_vtk(last(os.path.join(FL, "fluid_cold_*.vtk")))
-Ts, _, es, dxs, dys = read_vtk(last(os.path.join(SO, "solid_*.vtk")))
-Tmin = min(np.nanmin(Tc), np.nanmin(Th), np.nanmin(Ts))
-Tmax = max(np.nanmax(Tc), np.nanmax(Th), np.nanmax(Ts))
+hot = Field(sorted_files(os.path.join(FL, "fluid_hot_*.vtk"))[-1])
+cold = Field(sorted_files(os.path.join(FL, "fluid_cold_*.vtk"))[-1])
+solid = Field(sorted_files(os.path.join(SO, "solid_*.vtk"))[-1])
+Tmin = min(np.nanmin(f.T) for f in (hot, cold, solid))
+Tmax = max(np.nanmax(f.T) for f in (hot, cold, solid))
 Tmid = 0.5 * (Tmin + Tmax)
 half = max(Tmax - Tmid, Tmid - Tmin)
-cmap = LinearSegmentedColormap.from_list("cold-hot", [BLUE, "#e9e8e4", ORANGE])
-cmap.set_bad("#3d3d3a")  # masked solid nodes (baffles)
-mm = 1e3
-for T, e, hx, hy in ((Th, eh, dxh, dxh), (Tc, ec, dxc, dxc), (Ts, es, dxs, dys)):
-    ext = [(e[0] - hx / 2) * mm, (e[1] + hx / 2) * mm, (e[2] - hy / 2) * mm, (e[3] + hy / 2) * mm]
-    im = ax.imshow(T, origin="lower", extent=ext, cmap=cmap, vmin=Tmid - half, vmax=Tmid + half,
-                   aspect="auto", interpolation="nearest")
-for yi in (es[2], es[3]):
-    ax.axhline(yi * mm, color=INK, lw=0.8, ls="--")
-# streamlines of the two channels (lattice node centres form a uniform grid)
-for V, e in ((Vh, eh), (Vc, ec)):
-    if V is None:
-        continue
-    xs = np.linspace(e[0], e[1], V.shape[1]) * mm
-    ys = np.linspace(e[2], e[3], V.shape[0]) * mm
-    keep = (xs >= 0) & (xs <= eh[1] * mm)
-    ax.streamplot(xs[keep], ys, V[:, keep, 0], V[:, keep, 1], density=(2.6, 1.1), color=INK,
-                  linewidth=0.5, arrowsize=0.6)
-ax.set_xlim(0, (eh[1] + dxh / 2) * mm)
-ax.set_ylim(0, (eh[3] + dxh / 2) * mm)
-ax.set_aspect("equal")
-ax.grid(False)
-ax.set_xlabel("x [mm]")
-ax.set_ylabel("y [mm]")
+im = draw_fields(ax, (hot, cold, solid), temperature_cmap(), Tmid - half, Tmid + half,
+                 x_max=hot.extent[1] + hot.dx / 2)
+ax.set_ylim(0, (hot.extent[3] + hot.dx / 2) * MM)
 ax.set_title(f"(a) T and streamlines, t = {t[-1]:.1f} s:  hot channel (→, top), insulating wall, "
              "cold channel (←, bottom); baffles dark grey", loc="left", color=INK)
 cb = fig.colorbar(im, ax=ax, shrink=0.9, pad=0.01)
@@ -142,11 +73,11 @@ cb.set_label("T [K]")
 
 # (b) interface heat flux, both meshes
 ax = fig.add_subplot(gs[1, 0])
-ax.plot(fi["x"] * mm, -fi["q_hot"] / 1e3, color=ORANGE, label="hot fluid → wall  (Fluid mesh)")
-ax.plot(si["x"] * mm, -si["q_hot"] / 1e3, ls="none", marker="o", ms=4, mfc=SURF, mec=ORANGE, mew=1.2,
+ax.plot(fi["x"] * MM, -fi["q_hot"] / 1e3, color=ORANGE, label="hot fluid → wall  (Fluid mesh)")
+ax.plot(si["x"] * MM, -si["q_hot"] / 1e3, ls="none", marker="o", ms=4, mfc=SURF, mec=ORANGE, mew=1.2,
         label="hot fluid → wall  (Solid mesh)")
-ax.plot(fi["x"] * mm, fi["q_cold"] / 1e3, color=BLUE, label="wall → cold fluid  (Fluid mesh)")
-ax.plot(si["x"] * mm, si["q_cold"] / 1e3, ls="none", marker="s", ms=4, mfc=SURF, mec=BLUE, mew=1.2,
+ax.plot(fi["x"] * MM, fi["q_cold"] / 1e3, color=BLUE, label="wall → cold fluid  (Fluid mesh)")
+ax.plot(si["x"] * MM, si["q_cold"] / 1e3, ls="none", marker="s", ms=4, mfc=SURF, mec=BLUE, mew=1.2,
         label="wall → cold fluid  (Solid mesh)")
 ax.set_xlabel("x [mm]")
 ax.set_ylabel("heat flux [kW/m²]")
@@ -155,11 +86,11 @@ ax.legend(fontsize=8.5, loc="best")
 
 # (c) interface temperature, both meshes
 ax = fig.add_subplot(gs[1, 1])
-ax.plot(fi["x"] * mm, fi["Tw_hot"], color=ORANGE, label="hot interface  (Fluid writes)")
-ax.plot(si["x"] * mm, si["T_hot"], ls="none", marker="o", ms=4, mfc=SURF, mec=ORANGE, mew=1.2,
+ax.plot(fi["x"] * MM, fi["Tw_hot"], color=ORANGE, label="hot interface  (Fluid writes)")
+ax.plot(si["x"] * MM, si["T_hot"], ls="none", marker="o", ms=4, mfc=SURF, mec=ORANGE, mew=1.2,
         label="hot interface  (Solid reads, mapped)")
-ax.plot(fi["x"] * mm, fi["Tw_cold"], color=BLUE, label="cold interface  (Fluid writes)")
-ax.plot(si["x"] * mm, si["T_cold"], ls="none", marker="s", ms=4, mfc=SURF, mec=BLUE, mew=1.2,
+ax.plot(fi["x"] * MM, fi["Tw_cold"], color=BLUE, label="cold interface  (Fluid writes)")
+ax.plot(si["x"] * MM, si["T_cold"], ls="none", marker="s", ms=4, mfc=SURF, mec=BLUE, mew=1.2,
         label="cold interface  (Solid reads, mapped)")
 ax.set_xlabel("x [mm]")
 ax.set_ylabel("T [K]")

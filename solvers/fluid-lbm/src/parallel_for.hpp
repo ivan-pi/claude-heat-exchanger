@@ -13,15 +13,15 @@
 //           - nvc++ -cuda -gpu=mem:managed, or nvcc --extended-lambda          [untested here]
 //   SERIAL  plain loop (debugging)
 //
-// parallel_reduce_sum(n, f) returns sum_i f(i) (std::transform_reduce / CUDA block reduction).
+// parallel_reduce(n, f) returns sum_i f(i); the summand type is deduced from f and may be
+// a plain struct with operator+ (value-initialised to zero), so several sums share one pass.
 //
 // Rule for kernels: capture by value only ([=]), never `this` and never references to
 // host-stack objects -- otherwise the lambda is not GPU-safe.
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
-#include <cstdint>
-#include <iterator>
 #include <new>
 #include <vector>
 
@@ -29,59 +29,29 @@
 #include <cuda_runtime.h>
 #define LBM_HD __host__ __device__
 #define LBM_LAMBDA [=] __host__ __device__
-#elif defined(LBM_BACKEND_STDPAR)
-#include <algorithm>
-#include <execution>
-#include <functional>
-#include <numeric>
-#define LBM_HD
-#define LBM_LAMBDA [=]
 #else
 #define LBM_HD
 #define LBM_LAMBDA [=]
 #endif
 
+// Full unrolling of the short loops over the lattice directions, so that the direction
+// tables and weights fold into constants.
+#if defined(__NVCOMPILER) || defined(__CUDACC__)
+#define LBM_UNROLL _Pragma("unroll")
+#elif defined(__GNUC__)
+#define LBM_UNROLL _Pragma("GCC unroll 9")
+#else
+#define LBM_UNROLL
+#endif
+
+#if defined(LBM_BACKEND_STDPAR)
+#include <execution>
+#include <functional>
+#include <iterator>
+#include <numeric>
+#endif
+
 namespace lbm {
-
-// ---------------------------------------------------------------------------------------
-// Random-access counting iterator (portable replacement for std::views::iota, whose
-// legacy iterator_category is only input_iterator_tag in libstdc++ and thus rejected by
-// the parallel algorithms).
-// ---------------------------------------------------------------------------------------
-struct counting_iterator {
-  using iterator_category = std::random_access_iterator_tag;
-  using value_type        = int;
-  using difference_type   = std::ptrdiff_t;
-  using pointer           = const int *;
-  using reference         = int;
-
-  int i = 0;
-
-  LBM_HD counting_iterator() = default;
-  LBM_HD explicit counting_iterator(int v) : i(v) {}
-
-  LBM_HD reference operator*() const { return i; }
-  LBM_HD reference operator[](difference_type n) const { return i + static_cast<int>(n); }
-
-  LBM_HD counting_iterator &operator++() { ++i; return *this; }
-  LBM_HD counting_iterator operator++(int) { counting_iterator t = *this; ++i; return t; }
-  LBM_HD counting_iterator &operator--() { --i; return *this; }
-  LBM_HD counting_iterator operator--(int) { counting_iterator t = *this; --i; return t; }
-  LBM_HD counting_iterator &operator+=(difference_type n) { i += static_cast<int>(n); return *this; }
-  LBM_HD counting_iterator &operator-=(difference_type n) { i -= static_cast<int>(n); return *this; }
-
-  LBM_HD friend counting_iterator operator+(counting_iterator a, difference_type n) { return counting_iterator(a.i + static_cast<int>(n)); }
-  LBM_HD friend counting_iterator operator+(difference_type n, counting_iterator a) { return counting_iterator(a.i + static_cast<int>(n)); }
-  LBM_HD friend counting_iterator operator-(counting_iterator a, difference_type n) { return counting_iterator(a.i - static_cast<int>(n)); }
-  LBM_HD friend difference_type operator-(counting_iterator a, counting_iterator b) { return a.i - b.i; }
-
-  LBM_HD friend bool operator==(counting_iterator a, counting_iterator b) { return a.i == b.i; }
-  LBM_HD friend bool operator!=(counting_iterator a, counting_iterator b) { return a.i != b.i; }
-  LBM_HD friend bool operator<(counting_iterator a, counting_iterator b) { return a.i < b.i; }
-  LBM_HD friend bool operator>(counting_iterator a, counting_iterator b) { return a.i > b.i; }
-  LBM_HD friend bool operator<=(counting_iterator a, counting_iterator b) { return a.i <= b.i; }
-  LBM_HD friend bool operator>=(counting_iterator a, counting_iterator b) { return a.i >= b.i; }
-};
 
 // ---------------------------------------------------------------------------------------
 // Memory: std::vector with an allocator that returns memory accessible from host and
@@ -118,9 +88,11 @@ using device_vector = std::vector<T>;
 #endif
 
 // ---------------------------------------------------------------------------------------
-// parallel_for / device_sync
+// parallel_for / parallel_reduce / device_sync
 // ---------------------------------------------------------------------------------------
 #if defined(LBM_BACKEND_CUDA)
+
+constexpr int kBlock = 256; // threads per block, also the shared-memory size of the reduction
 
 template <class F>
 __global__ void parallel_for_kernel(int n, F f)
@@ -134,45 +106,55 @@ __global__ void parallel_for_kernel(int n, F f)
 template <class F>
 inline void parallel_for(int n, F f)
 {
-  if (n <= 0) {
-    return;
+  if (n > 0) {
+    parallel_for_kernel<<<(n + kBlock - 1) / kBlock, kBlock>>>(n, f);
   }
-  constexpr int block = 256;
-  parallel_for_kernel<<<(n + block - 1) / block, block>>>(n, f);
 }
 
-template <class F>
-__global__ void reduce_sum_kernel(int n, F f, double *out)
+// Grid-stride partial sums, one per block; the host adds the partials (deterministic, no atomics).
+template <class T, class F>
+__global__ void reduce_kernel(int n, F f, T *partial)
 {
-  __shared__ double buf[256];
-  const int idx = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
-  buf[threadIdx.x] = idx < n ? f(idx) : 0.0;
+  __shared__ T buf[kBlock];
+  T s{};
+  for (int i = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x); i < n;
+       i += static_cast<int>(gridDim.x) * static_cast<int>(blockDim.x)) {
+    s = s + f(i);
+  }
+  buf[threadIdx.x] = s;
   __syncthreads();
-  for (unsigned s = blockDim.x / 2; s > 0; s >>= 1) {
-    if (threadIdx.x < s) {
-      buf[threadIdx.x] += buf[threadIdx.x + s];
+  for (unsigned w = blockDim.x / 2; w > 0; w >>= 1) {
+    if (threadIdx.x < w) {
+      buf[threadIdx.x] = buf[threadIdx.x] + buf[threadIdx.x + w];
     }
     __syncthreads();
   }
   if (threadIdx.x == 0) {
-    atomicAdd(out, buf[0]);
+    partial[blockIdx.x] = buf[0];
   }
 }
 
 // Sum of f(i), i in [0, n). Blocking (used for diagnostics only).
 template <class F>
-inline double parallel_reduce_sum(int n, F f)
+inline auto parallel_reduce(int n, F f) -> decltype(f(0))
 {
-  static double *acc = nullptr;
-  if (acc == nullptr) {
-    cudaMallocManaged(&acc, sizeof(double));
+  using T                   = decltype(f(0));
+  constexpr int  kMaxBlocks = 1024;
+  static T      *partial    = nullptr; // device buffer, one allocation per summand type
+  static std::vector<T> host(kMaxBlocks);
+  if (partial == nullptr) {
+    cudaMalloc(&partial, kMaxBlocks * sizeof(T));
   }
-  *acc = 0.0;
-  if (n > 0) {
-    reduce_sum_kernel<<<(n + 255) / 256, 256>>>(n, f, acc);
+  const int blocks = std::min(kMaxBlocks, (n + kBlock - 1) / kBlock);
+  T         s{};
+  if (blocks > 0) {
+    reduce_kernel<<<blocks, kBlock>>>(n, f, partial);
+    cudaMemcpy(host.data(), partial, blocks * sizeof(T), cudaMemcpyDeviceToHost); // synchronous
+    for (int b = 0; b < blocks; ++b) {
+      s = s + host[b];
+    }
   }
-  cudaDeviceSynchronize();
-  return *acc;
+  return s;
 }
 
 // Kernels on the default stream are ordered; the host only has to wait before it
@@ -183,6 +165,44 @@ inline const char *backend_name() { return "CUDA"; }
 
 #elif defined(LBM_BACKEND_STDPAR)
 
+// Random-access counting iterator (portable replacement for std::views::iota, whose
+// legacy iterator_category is only input_iterator_tag in libstdc++ and thus rejected by
+// the parallel algorithms). The full operator set is required by the PSTL.
+struct counting_iterator {
+  using iterator_category = std::random_access_iterator_tag;
+  using value_type        = int;
+  using difference_type   = std::ptrdiff_t;
+  using pointer           = const int *;
+  using reference         = int;
+
+  int i = 0;
+
+  counting_iterator() = default;
+  explicit counting_iterator(int v) : i(v) {}
+
+  reference operator*() const { return i; }
+  reference operator[](difference_type n) const { return i + static_cast<int>(n); }
+
+  counting_iterator &operator++() { ++i; return *this; }
+  counting_iterator operator++(int) { counting_iterator t = *this; ++i; return t; }
+  counting_iterator &operator--() { --i; return *this; }
+  counting_iterator operator--(int) { counting_iterator t = *this; --i; return t; }
+  counting_iterator &operator+=(difference_type n) { i += static_cast<int>(n); return *this; }
+  counting_iterator &operator-=(difference_type n) { i -= static_cast<int>(n); return *this; }
+
+  friend counting_iterator operator+(counting_iterator a, difference_type n) { return counting_iterator(a.i + static_cast<int>(n)); }
+  friend counting_iterator operator+(difference_type n, counting_iterator a) { return counting_iterator(a.i + static_cast<int>(n)); }
+  friend counting_iterator operator-(counting_iterator a, difference_type n) { return counting_iterator(a.i - static_cast<int>(n)); }
+  friend difference_type operator-(counting_iterator a, counting_iterator b) { return a.i - b.i; }
+
+  friend bool operator==(counting_iterator a, counting_iterator b) { return a.i == b.i; }
+  friend bool operator!=(counting_iterator a, counting_iterator b) { return a.i != b.i; }
+  friend bool operator<(counting_iterator a, counting_iterator b) { return a.i < b.i; }
+  friend bool operator>(counting_iterator a, counting_iterator b) { return a.i > b.i; }
+  friend bool operator<=(counting_iterator a, counting_iterator b) { return a.i <= b.i; }
+  friend bool operator>=(counting_iterator a, counting_iterator b) { return a.i >= b.i; }
+};
+
 template <class F>
 inline void parallel_for(int n, F f)
 {
@@ -190,10 +210,11 @@ inline void parallel_for(int n, F f)
 }
 
 template <class F>
-inline double parallel_reduce_sum(int n, F f)
+inline auto parallel_reduce(int n, F f) -> decltype(f(0))
 {
-  return std::transform_reduce(std::execution::par_unseq, counting_iterator(0), counting_iterator(n), 0.0,
-                               std::plus<double>(), f);
+  using T = decltype(f(0));
+  return std::transform_reduce(std::execution::par_unseq, counting_iterator(0), counting_iterator(n), T{},
+                               std::plus<T>(), f);
 }
 
 // The standard parallel algorithms are synchronous.
@@ -212,11 +233,11 @@ inline void parallel_for(int n, F f)
 }
 
 template <class F>
-inline double parallel_reduce_sum(int n, F f)
+inline auto parallel_reduce(int n, F f) -> decltype(f(0))
 {
-  double s = 0.0;
+  decltype(f(0)) s{};
   for (int i = 0; i < n; ++i) {
-    s += f(i);
+    s = s + f(i);
   }
   return s;
 }

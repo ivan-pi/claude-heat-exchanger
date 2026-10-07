@@ -62,7 +62,7 @@ else()
     target_link_options(solid-fdm PRIVATE ${_gnu_offload})
   endif()
   if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
-    target_compile_options(solid-fdm PRIVATE -Wall -Wno-unused-dummy-argument -Wno-maybe-uninitialized)
+    target_compile_options(solid-fdm PRIVATE -Wall)
   endif()
 endif()
 
