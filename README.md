@@ -32,7 +32,8 @@ solvers/fluid-lbm/           Code A: C++17, kernels as lambdas behind lbm::paral
 solvers/solid-fdm/           Code B: Fortran 2008 + OpenMP target offload
   src/heat_solver.f90        backward Euler, matrix-free Jacobi-PCG, flux recovery
   src/solid_main.f90         preCICE adapter (official Fortran module)
-case/                        precice-config.xml, params.txt, run scripts, plot_energy.py
+case/                        precice-config.xml, params.txt, run scripts
+  plot_energy.py, animate.py post-processing (shared helpers in hx_post.py)
 ```
 
 ## Numerics
@@ -46,13 +47,13 @@ case/                        precice-config.xml, params.txt, run scripts, plot_e
 - **Grid:** the inlet and outlet boundary columns sit half a lattice spacing outside [0, L], so all interface heat enters interior nodes.
 - **Start-up:** before coupling starts, the flow is developed for `lbm_flow_init_time` (2 s, 8000 steps). The thermal populations are then reset to the uniform initial temperature, in equilibrium with the developed velocity. Without this phase, the start-up pressure waves around the baffles (the initial profile isn't divergence free) act as spurious sources of θ in the conservative D2Q5 equation. The hot stream briefly reached 358 K, against a 350 K inlet.
 - **Time stepping:** the fluid subcycles 200 LBM steps (Δt = 0.25 ms) per 0.05 s coupling window.
-- **Kernels:** stream+collide is one fused pull kernel per channel. The others are the inlet/outlet columns, wall-temperature gather, flux scatter, checkpoint copies and budget reductions.
+- **Kernels:** two launches per channel and step: the fused pull stream+collide kernel (which also books the scalar flux through the inlet/outlet faces for the energy budget) and the inlet/outlet columns. The macroscopic fields are not stored every step; they are derived from the populations once per window for the budget and the output. Per window there are also the wall-temperature gather, the checkpoint copies and one budget reduction per channel.
 
 **Code B: wall (`solid-fdm`).**
 - **Discretization:** vertex-centred finite differences in finite-volume form, with half cells on every boundary. The matrix is SPD and the interface flux comes from the boundary half-cell energy balance, so the wall is discretely conservative.
 - **Time stepping:** backward Euler, one step per window.
-- **Linear solver:** matrix-free CG with a Jacobi preconditioner. It stops when the residual has dropped by `cg_tol` relative to the initial residual (the flux imbalance driving the step), with an absolute floor at round-off.
-- **GPU data:** all fields stay on the device (`target enter data`). Only the 1-D interface buffers move, via `target update`.
+- **Linear solver:** matrix-free CG with a Jacobi preconditioner (the diagonal depends on the column and the step size only, so it is a 1-D array per step). The dot product p·Ap is formed inside the matrix-vector kernel, so one CG iteration is three target regions. It stops when the residual has dropped by `cg_tol` relative to the initial residual (the flux imbalance driving the step), with an absolute floor at round-off.
+- **GPU data:** all fields stay on the device (`target enter data`); the grid and material constants are `declare target` module variables. Only the 1-D interface buffers (and the preconditioner diagonal) move, via `target update`.
 
 ## Coupling choices (`case/precice-config.xml`)
 
@@ -93,6 +94,8 @@ Further options:
 
 ```bash
 case/run-coupled.sh                 # both participants, logs in case/fluid|solid/*.log
+#   on a shared host build: OMP_NUM_THREADS=1 OMP_WAIT_POLICY=passive keeps the solid's
+#   idle OpenMP threads from spinning against the fluid's TBB workers
 python3 case/plot_energy.py         # -> case/energy_balance.png, case/energy_summary.txt
 python3 case/animate.py             # -> case/heat_exchanger.mp4 (needs ffmpeg)
 ```
@@ -171,8 +174,8 @@ as follows:
   managed buffer. After `device_sync()`, that pointer goes straight to preCICE. The flux is
   read into a second small managed buffer that the next kernel picks up. There's no explicit
   copy, and only those pages migrate, not the lattice.
-- **Code B (OpenMP):** `!$omp target update from(q_hot, q_cold)` / `to(Tb_hot, Tb_cold)` on the
-  1-D interface buffers only. With `-gpu=mem:unified` on Grace Hopper these updates are
+- **Code B (OpenMP):** `!$omp target update from(q)` / `to(Tb)` on the 1-D interface
+  buffers only. With `-gpu=mem:unified` on Grace Hopper these updates are
   practically free, and the same code still works on discrete GPUs.
 
 ## Limitations / next steps

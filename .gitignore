@@ -5,3 +5,4 @@ case/*/output/
 case/*/*.log
 case/*/precice-*
 case/run.log
+case/__pycache__/
